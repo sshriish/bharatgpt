@@ -1,0 +1,6 @@
+streamlit
+pandas
+scikit-learn
+matplotlib
+deep-translator
+anthropic   # optional: enables LLM answers when ANTHROPIC_API_KEY is set
