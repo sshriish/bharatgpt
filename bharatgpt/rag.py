@@ -28,6 +28,13 @@ def translate(text, src, dest):
     except Exception:
         return text
 
+ALIASES = {"pm": "pradhan mantri", "pmjay": "ayushman bharat pradhan mantri jan arogya", "cm": "chief minister",
+           "mgnrega": "mahatma gandhi national rural employment guarantee", "nrega": "mahatma gandhi national rural employment guarantee",
+           "rti": "right to information", "lpg": "lpg gas", "pmay": "pradhan mantri awas yojana", "pmfby": "pradhan mantri fasal bima"}
+
+def expand_query(q):
+    return " ".join(ALIASES.get(w.lower().strip("?.,!"), w) for w in q.split())
+
 def classify_intent(q):
     q = q.lower()
     if any(w in q for w in ["complaint", "grievance", "not received", "bribe", "corrupt", "harass", "delay", "cheated"]):
@@ -112,10 +119,12 @@ def _llm_answer(question, hits):
 def answer(kb, question, threshold=0.30):
     """Returns dict(answer, sources, confidence, intent, mode)."""
     intent = classify_intent(question)
+    question = expand_query(question)
     hits = kb.search(question, k=12)
     top = hits[0][0]
-    qw = set(w for w in question.lower().replace('-', ' ').split() if len(w) > 3)
-    tw = set(hits[0][1]['title'].lower().replace('-', ' ').split())
+    GENERIC = {"scheme", "yojana", "eligibility", "benefits", "benefit", "apply", "documents", "government", "what", "which", "where", "when", "does", "about", "tell", "help", "need", "with", "from", "have", "that", "this", "your", "world"}
+    qw = set(w for w in question.lower().replace('-', ' ').split() if len(w) > 3 and w not in GENERIC)
+    tw = set(w for _, c in hits[:5] for w in c['title'].lower().replace('-', ' ').split())
     if top < threshold and not (qw & tw):
         return {"answer": "I could not find this in my official-document knowledge base, so I will not guess. "
                           "For complaints you can use the Grievance tab or CPGRAMS (pgportal.gov.in).",
