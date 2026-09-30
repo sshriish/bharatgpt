@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 from rag import *
 
@@ -7,7 +8,7 @@ st.caption("Multilingual, source-grounded assistant for government services, sch
 
 @st.cache_resource
 def load_kb():
-    return KnowledgeBase("data")
+       return KnowledgeBase(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 kb = load_kb()
 st.sidebar.write(f"Knowledge base: **{len(kb.chunks)}** chunks")
 st.sidebar.warning("Student project. NOT an official government service. Verify every answer on the source link.")
