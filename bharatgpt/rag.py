@@ -128,7 +128,7 @@ def answer(kb, question, threshold=0.30):
     if top < threshold and not (qw & tw):
         return {"answer": "I could not find this in my official-document knowledge base, so I will not guess. "
                           "For complaints you can use the Grievance tab or CPGRAMS (pgportal.gov.in).",
-                "sources": [], "confidence": top, "intent": intent, "mode": "guardrail"}
+                "sources": [], "confidence": top, "intent": intent, "mode": "guardrail", "title": None, "sections": []}
     best_title = hits[0][1]["title"]
     good = [h for h in hits if h[1]["title"] == best_title]
     good.sort(key=lambda h: FIELD_ORDER.index(h[1]["field"]) if h[1]["field"] in FIELD_ORDER else 99)
@@ -139,7 +139,8 @@ def answer(kb, question, threshold=0.30):
         text = f"**{best_title}**\n\n" + "\n\n".join(
             f"**{c['field'].replace('_', ' ').title()}:** {c['text'][:700]}" for _, c in good if c["field"] != "category")
     srcs = list(dict.fromkeys(c["source"] for _, c in good))
-    return {"answer": text, "sources": srcs, "confidence": top, "intent": intent, "mode": mode}
+    return {"answer": text, "sources": srcs, "confidence": top, "intent": intent, "mode": mode,
+            "title": best_title, "sections": [(c["field"], c["text"]) for _, c in good if c["field"] != "category"]}
 
 # ---------- grievance module (SQLite) ----------
 def _db(path="grievances.db"):
