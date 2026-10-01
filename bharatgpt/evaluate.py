@@ -18,7 +18,8 @@ TESTS = [
 ("Toilet construction incentive in rural areas","Swachh Bharat"),
 ("Where to file a complaint against a government department online?","CPGRAMS"),("What is the fee to file RTI?","Right to Information"),
 ]
-kb = KnowledgeBase("data")
+HERE = os.path.dirname(os.path.abspath(__file__))
+kb = KnowledgeBase(os.path.join(HERE, "data"))
 top1 = top3 = rr = 0
 for q, exp in TESTS:
     titles = [t for _, t in kb.top_schemes(q, k=3)]
@@ -27,4 +28,4 @@ for q, exp in TESTS:
     if rank != 1: print("MISS@1:", q, "->", titles[0])
 n = len(TESTS)
 res = {"n": n, "top1": round(100 * top1 / n, 1), "top3": round(100 * top3 / n, 1), "mrr": round(rr / n, 3), "chunks": len(kb.chunks)}
-json.dump(res, open("eval_results.json", "w")); print(res)
+json.dump(res, open(os.path.join(HERE, "eval_results.json"), "w")); print(res)
