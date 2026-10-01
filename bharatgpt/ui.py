@@ -1,3 +1,5 @@
+import html
+import re
 """All styling and HTML for the BharatGPT interface."""
 import html
 
