@@ -1,6 +1,6 @@
 # BharatGPT - Multilingual RAG assistant for digital governance
-Run: `pip install -r requirements.txt` then `streamlit run app.py`
-https://bharatgpt-india.streamlit.app/
+Run: pip install -r bharatgpt/requirements.txt then streamlit run bharatgpt/app.py
+# https://bharatgpt-india.streamlit.app/
 
 ## Pipeline
 User text -> language detection (Unicode script) -> translate to English -> intent classification -> TF-IDF retrieval over `data/*.csv`
@@ -16,7 +16,7 @@ Grievance tab: form -> draft complaint letter -> SQLite reference ID -> status l
 3. Run `python evaluate.py` after editing the TESTS list to match your dataset. Cite the dataset in your paper.
 
 ## Data note
-`data/schemes_sample.csv` was compiled from general knowledge of public schemes for demo purposes. Verify amounts and rules on each source_url before presenting them as facts.
+`data_sample/schemes_sample.csv` was compiled from general knowledge of public schemes for demo purposes. Verify amounts and rules on each source_url before presenting them as facts.
 
 ## Survey
 Use `survey/google_form_questions.md`, export responses, then `python survey/survey_analysis.py survey/survey_responses.csv`.
@@ -26,6 +26,6 @@ TF-IDF retrieval is English-only, so other languages depend on translation. No v
 
 ## Publish
 1. `git init && git add . && git commit -m "BharatGPT" ` then push to a new GitHub repo.
-2. Go to share.streamlit.io, sign in with GitHub, pick the repo, main file `app.py`, Deploy. You get a public link.
+2. Go to share.streamlit.io, sign in with GitHub, pick the repo, main file `bharatgpt/app.py`, Deploy. You get a public link.
 3. Optional LLM answers: in the app's Settings > Secrets add `ANTHROPIC_API_KEY = "..."`. Never commit keys. Leave it off if you do not want public traffic using your credit.
 Note: hosted disk is temporary, so registered grievances may disappear on restart (fine for a demo).
