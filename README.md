@@ -1,5 +1,6 @@
 # BharatGPT - Multilingual RAG assistant for digital governance
 Run: `pip install -r requirements.txt` then `streamlit run app.py`
+https://bharatgpt-india.streamlit.app/
 
 ## Pipeline
 User text -> language detection (Unicode script) -> translate to English -> intent classification -> TF-IDF retrieval over `data/*.csv`
