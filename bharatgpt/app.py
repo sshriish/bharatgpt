@@ -63,8 +63,8 @@ def tx_many(items, src, dest):
     """
     Batch translate.
 
-    Unlike rag.translate, this RAISES on failure
-    so errors are visible and never cached.
+    This RAISES on failure so errors are visible
+    and never cached.
     """
     if src == dest:
         return items
@@ -110,11 +110,18 @@ def run_query(q):
         ("Answer", r["answer"])
     ]
 
+    # For eligibility questions, show "Who can apply" first
+    if r["intent"] == "eligibility":
+        items.sort(key=lambda x: x[0] != "Who can apply")
+
+    # LLM summary (only exists when ANTHROPIC_API_KEY is set)
+    summary = r["answer"] if r["mode"] == "llm-rag" else ""
+
     labels = [l for l, _ in items]
 
     texts = [
-        t if len(t) <= 600
-        else t[:600].rsplit(" ", 1)[0] + "…"
+        t if len(t) <= 1500
+        else t[:1500].rsplit(" ", 1)[0] + "…"
         for _, t in items
     ]
 
@@ -136,11 +143,12 @@ def run_query(q):
     )
 
     # Translate title, confidence text, intent,
-    # section labels and section contents together
+    # section labels, section contents and summary together
     out = tx_many(
         [r["title"] or "Answer", word, intent_label]
         + labels
-        + texts,
+        + texts
+        + ([summary] if summary else []),
         "en",
         lang
     )
@@ -153,7 +161,10 @@ def run_query(q):
 
     texts_t = out[
         3 + len(labels):
+        3 + len(labels) + len(texts)
     ]
+
+    summary_t = out[-1] if summary else ""
 
     # Find official source link
     link = next(
@@ -178,6 +189,8 @@ def run_query(q):
     return {
         "ok": True,
         "title": title,
+        "title_en": r["title"],
+        "summary": summary_t,
         "lang": LANG_NAMES[lang],
         "intent": r["intent"],
         "intent_label": intent_t,
@@ -256,7 +269,8 @@ def render_answer(q):
             d["n"],
             d["word"],
             host,
-            d["link"]
+            d["link"],
+            d["summary"]
         ),
         unsafe_allow_html=True
     )
@@ -296,6 +310,10 @@ def render_answer(q):
         )
 
     if fb is not None:
+        if st.session_state.get(f"fbd_{k}") != fb:
+            log_feedback(q, d["title_en"], fb)
+            st.session_state[f"fbd_{k}"] = fb
+
         st.caption(
             "Thanks, your feedback helps improve answers."
             if fb == 1
@@ -337,7 +355,7 @@ def render_answer(q):
 # ---------------------------------------------------------
 
 st.markdown(
-    ui.TOPBAR + ui.HERO,
+    ui.TOPBAR + ui.hero(kb.n_schemes, len(LANG_NAMES) - 1),
     unsafe_allow_html=True
 )
 
