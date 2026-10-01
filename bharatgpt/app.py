@@ -250,6 +250,7 @@ def render_answer(q):
             ),
             unsafe_allow_html=True
         )
+
         return
 
     host = (
@@ -399,7 +400,7 @@ with tab1:
         st.button(
             "Clear search",
             on_click=setq,
-            args=("")
+            args=("",)
         )
 
         render_answer(q)
