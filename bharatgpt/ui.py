@@ -1,16 +1,16 @@
-import html
-import re
 """All styling and HTML for the BharatGPT interface."""
 import html
+import re
 
 e = html.escape
 
 
 CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Noto+Sans:wght@400;500;600&family=Noto+Sans+Devanagari:wght@400;600&family=Noto+Sans+Tamil:wght@400;600&family=Noto+Sans+Telugu:wght@400;600&family=Noto+Sans+Kannada:wght@400;600&family=Noto+Sans+Bengali:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Noto+Sans:wght@400;500;600&family=Noto+Sans+Devanagari:wght@400;600&family=Noto+Sans+Tamil:wght@400;600&family=Noto+Sans+Telugu:wght@400;600&family=Noto+Sans+Kannada:wght@400;600&family=Noto+Sans+Bengali:wght@400;600&family=Noto+Sans+Malayalam:wght@400;600&family=Noto+Sans+Gujarati:wght@400;600&family=Noto+Sans+Gurmukhi:wght@400;600&family=Noto+Sans+Oriya:wght@400;600&family=Noto+Naskh+Arabic:wght@400;600&display=swap');
 
 :root{
+    --indic:'Noto Sans Devanagari','Noto Sans Tamil','Noto Sans Telugu','Noto Sans Kannada','Noto Sans Bengali','Noto Sans Malayalam','Noto Sans Gujarati','Noto Sans Gurmukhi','Noto Sans Oriya','Noto Naskh Arabic';
     --ink:#14213D;
     --muted:#5B6785;
     --line:#E1E6F0;
@@ -46,15 +46,18 @@ footer,
 .stApp p,
 .stApp li,
 .stApp label,
-.stApp span,
-.stApp div{
-    font-family:'Noto Sans',
-    'Noto Sans Devanagari',
-    'Noto Sans Tamil',
-    'Noto Sans Telugu',
-    'Noto Sans Kannada',
-    'Noto Sans Bengali',
-    sans-serif;
+.stApp button,
+.stApp input,
+.stApp textarea,
+.topbar, .topbar *,
+.hero, .hero *,
+.card, .card *,
+.note, .note *,
+.ref, .ref *,
+.track, .track *,
+.tryhead,
+.fine{
+    font-family:'Noto Sans',var(--indic),sans-serif;
 }
 
 .stApp p,
@@ -80,7 +83,7 @@ footer,
 }
 
 .brand{
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-weight:800;
     font-size:1.15rem;
     color:var(--ink);
@@ -128,7 +131,7 @@ footer,
 }
 
 .h{
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-weight:800;
     font-size:2.6rem;
     line-height:1.12;
@@ -179,7 +182,7 @@ footer,
 
 .stats b{
     display:block;
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-size:1.3rem;
     color:#fff;
 }
@@ -197,7 +200,7 @@ footer,
 }
 
 .stTabs [data-baseweb="tab"]{
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-weight:700;
     color:var(--muted);
     border-radius:9px;
@@ -312,7 +315,7 @@ footer,
 }
 
 .tryhead{
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-weight:700;
     font-size:.95rem;
     color:var(--ink);
@@ -349,7 +352,7 @@ footer,
 }
 
 .card-title{
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-weight:800;
     font-size:1.5rem;
     line-height:1.25;
@@ -376,29 +379,29 @@ details.sec{
     border-top:1px solid var(--line);
 }
 
-details.sec summary{
+details.sec>summary{
     list-style:none;
     cursor:pointer;
     display:flex;
     justify-content:space-between;
     align-items:center;
     padding:1rem 1.7rem;
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-weight:700;
     font-size:.98rem;
     color:var(--ink);
     transition:background .15s;
 }
 
-details.sec summary::-webkit-details-marker{
+details.sec>summary::-webkit-details-marker{
     display:none;
 }
 
-details.sec summary:hover{
+details.sec>summary:hover{
     background:var(--bg);
 }
 
-details.sec summary::after{
+details.sec>summary::after{
     content:"";
     width:.5rem;
     height:.5rem;
@@ -409,7 +412,7 @@ details.sec summary::after{
     margin-right:.2rem;
 }
 
-details.sec[open] summary::after{
+details.sec[open]>summary::after{
     transform:rotate(-135deg);
 }
 
@@ -508,7 +511,7 @@ a.src:hover{
 }
 
 .ref .id{
-    font-family:'Plus Jakarta Sans',sans-serif;
+    font-family:'Plus Jakarta Sans',var(--indic),sans-serif;
     font-weight:800;
     font-size:1.8rem;
     color:var(--green);
@@ -575,6 +578,61 @@ a.src:hover{
     text-align:center;
 }
 
+/* ---- visibility fixes ---- */
+
+/* ".stApp p" (0,1,1) used to beat ".sub" (0,1,0): subtitle was dark-on-navy */
+.stApp .hero .sub{ color:#C6CFEE; }
+.stApp .card h2.card-title{ color:var(--ink)!important; }
+.stApp .hero h1.h{ color:#fff!important; }
+
+.stTextInput input::placeholder,
+.stTextArea textarea::placeholder{
+    color:#6B7794!important;
+    opacity:1!important;
+}
+
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] *{
+    color:var(--muted)!important;
+}
+
+[data-testid="stSpinner"],
+[data-testid="stSpinner"] *,
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary *,
+.stTabs [data-baseweb="tab"] p{
+    color:var(--ink)!important;
+}
+
+.stTabs [aria-selected="true"] p{ color:var(--ink)!important; }
+
+.card-sum{
+    padding:1rem 1.7rem 1.2rem 1.7rem;
+    border-top:1px solid var(--line);
+    background:#FFF9F1;
+    font-size:1rem;
+    line-height:1.7;
+    color:var(--ink);
+}
+
+.card-sum small{
+    display:block;
+    font-weight:700;
+    font-size:.75rem;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    color:var(--saffron);
+    margin-bottom:.3rem;
+}
+
+details.more>summary{
+    cursor:pointer;
+    color:var(--blue);
+    font-weight:600;
+    font-size:.9rem;
+    margin-top:.4rem;
+}
+
 @media(max-width:640px){
     .h{
         font-size:1.9rem;
@@ -614,29 +672,32 @@ TOPBAR = (
 )
 
 
-HERO = (
-    '<div class="hero">'
-    '<div class="flag"></div>'
-    '<div class="hero-in">'
-    '<h1 class="h">Government schemes, explained in your language.</h1>'
-    '<p class="sub">Ask a question and get a clear answer with the official source, drawn from Central and State scheme documents.</p>'
-    '<div class="langs">'
-    '<span>English</span>'
-    '<span>हिन्दी</span>'
-    '<span>தமிழ்</span>'
-    '<span>తెలుగు</span>'
-    '<span>ಕನ್ನಡ</span>'
-    '<span>বাংলা</span>'
-    '<span>and more</span>'
-    '</div>'
-    '</div>'
-    '<div class="stats">'
-    '<div><b>3,400+</b>schemes indexed</div>'
-    '<div><b>9</b>Indian languages, plus English</div>'
-    '<div><b>Official</b>source on every answer</div>'
-    '</div>'
-    '</div>'
-)
+def hero(n_schemes, n_langs):
+    shown = f"{n_schemes:,}"
+    return (
+        '<div class="hero">'
+        '<div class="flag"></div>'
+        '<div class="hero-in">'
+        '<h1 class="h">Government schemes, explained in your language.</h1>'
+        '<p class="sub">Ask a question and get a clear answer with the official source, drawn from Central and State scheme documents.</p>'
+        '<div class="langs">'
+        '<span>English</span>'
+        '<span>हिन्दी</span>'
+        '<span>मराठी</span>'
+        '<span>தமிழ்</span>'
+        '<span>తెలుగు</span>'
+        '<span>ಕನ್ನಡ</span>'
+        '<span>বাংলা</span>'
+        '<span>and more</span>'
+        '</div>'
+        '</div>'
+        '<div class="stats">'
+        f'<div><b>{shown}</b>schemes indexed</div>'
+        f'<div><b>{n_langs}</b>Indian languages, plus English</div>'
+        '<div><b>Official</b>source on every answer</div>'
+        '</div>'
+        '</div>'
+    )
 
 
 COLORS = {
@@ -658,7 +719,23 @@ def head(t):
     return f'<div class="tryhead">{e(t)}</div>'
 
 
-def card(title, lang, intent, sections, strength, word, host, link):
+def _clean(t):
+    """A blank line would break out of the HTML block, so collapse them."""
+    return re.sub(r"\n\s*\n", "\n", t)
+
+
+def _body(t, limit=450):
+    t = _clean(t)
+    if len(t) <= limit:
+        return e(t)
+    cut = t[:limit].rsplit(" ", 1)[0]
+    return (
+        f'{e(cut)}'
+        f'<details class="more"><summary>Read more</summary>{e(t[len(cut):].strip())}</details>'
+    )
+
+
+def card(title, lang, intent, sections, strength, word, host, link, summary=""):
     body = ""
 
     for i, (l, t) in enumerate(sections):
@@ -667,7 +744,7 @@ def card(title, lang, intent, sections, strength, word, host, link):
         body += (
             f'<details class="sec"{op}>'
             f'<summary>{e(l)}</summary>'
-            f'<div class="sec-t">{e(t)}</div>'
+            f'<div class="sec-t" dir="auto">{_body(t)}</div>'
             f'</details>'
         )
 
@@ -686,15 +763,22 @@ def card(title, lang, intent, sections, strength, word, host, link):
         else ""
     )
 
+    sumbox = (
+        f'<div class="card-sum" dir="auto"><small>Quick answer</small>{e(_clean(summary))}</div>'
+        if summary
+        else ""
+    )
+
     return (
         f'<div class="card">'
         f'<div class="card-top">'
-        f'<h2 class="card-title">{e(title)}</h2>'
+        f'<h2 class="card-title" dir="auto">{e(title)}</h2>'
         f'<div class="badges">'
         f'<span class="badge">{e(lang)}</span>'
         f'<span class="badge">{e(INTENTS.get(intent, intent))}</span>'
         f'</div>'
         f'</div>'
+        f'{sumbox}'
         f'{body}'
         f'<div class="card-foot">'
         f'<div class="match">'
