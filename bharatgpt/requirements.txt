@@ -1,6 +1,7 @@
-streamlit
+streamlit>=1.40
 pandas
+numpy
 scikit-learn
 matplotlib
 deep-translator
-anthropic   # optional: enables LLM answers when ANTHROPIC_API_KEY is set
+anthropic
