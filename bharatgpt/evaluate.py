@@ -1,5 +1,5 @@
 """Retrieval evaluation on a labelled question set. Run: python evaluate.py"""
-import json
+import json, os
 from rag import KnowledgeBase
 TESTS = [
 ("How much money do farmers get every year from PM-KISAN?","Kisan Samman"),("Who is eligible for PM Kisan Samman Nidhi?","Kisan Samman"),
