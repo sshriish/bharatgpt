@@ -59,29 +59,48 @@ def load_kb():
 kb = load_kb()
 
 
+def _tx_one(text, src, dest):
+    """Translate one string; retry twice; fall back to the original text."""
+    from deep_translator import GoogleTranslator
+    import time
+
+    if not text or not text.strip() or text.strip().isdigit():
+        return text, True  # deep_translator rejects empty/digit-only strings
+
+    for attempt in range(3):
+        try:
+            out = GoogleTranslator(source=src, target=dest).translate(text)
+            return (out or text), True
+        except Exception:
+            time.sleep(0.5 * (attempt + 1))
+    return text, False
+
+
 def tx_many(items, src, dest):
     """
-    Batch translate.
-
-    This RAISES on failure so errors are visible
-    and never cached.
+    Parallel batch translate. One bad item no longer kills the whole answer:
+    it falls back to the English original. Raises only if EVERYTHING fails
+    (no internet / blocked), so errors stay visible and are never cached.
     """
     if src == dest:
         return items
 
-    from deep_translator import GoogleTranslator
+    from concurrent.futures import ThreadPoolExecutor
 
-    out = GoogleTranslator(
-        source=src,
-        target=dest
-    ).translate_batch(items)
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        res = list(ex.map(lambda t: _tx_one(t, src, dest), items))
 
-    return [o or i for o, i in zip(out, items)]
+    real = [ok for (t, ok), i in zip(res, items) if i and i.strip()]
+    if real and not any(real):
+        raise RuntimeError("Translation service unreachable")
+
+    return [t for t, _ in res]
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def run_query(q):
+def run_query(q, out_lang="auto"):
     lang = detect_lang(q)
+    target = lang if out_lang == "auto" else out_lang
 
     # Translate user's question to English
     q_en = tx_many([q], lang, "en")[0]
@@ -150,7 +169,7 @@ def run_query(q):
         + texts
         + ([summary] if summary else []),
         "en",
-        lang
+        target
     )
 
     title, word_t, intent_t = out[:3]
@@ -191,7 +210,7 @@ def run_query(q):
         "title": title,
         "title_en": r["title"],
         "summary": summary_t,
-        "lang": LANG_NAMES[lang],
+        "lang": LANG_NAMES[target],
         "intent": r["intent"],
         "intent_label": intent_t,
         "secs": list(
@@ -208,12 +227,12 @@ def setq(t):
     st.session_state.q = t
 
 
-def render_answer(q):
+def render_answer(q, out_lang="auto"):
     try:
         with st.spinner(
             "Reading official scheme documents…"
         ):
-            d = run_query(q)
+            d = run_query(q, out_lang)
 
     except Exception as ex:
         st.markdown(
@@ -377,6 +396,15 @@ tab1, tab2 = st.tabs(
 
 with tab1:
 
+    lang_opts = {"Auto (reply in my language)": "auto"}
+    lang_opts.update({n: c for c, n in LANG_NAMES.items()})
+    out_choice = st.selectbox(
+        "Answer language",
+        list(lang_opts),
+        key="out_lang"
+    )
+    out_lang = lang_opts[out_choice]
+
     q = st.text_input(
         "Your question",
         key="q",
@@ -403,7 +431,7 @@ with tab1:
             args=("",)
         )
 
-        render_answer(q)
+        render_answer(q, out_lang)
 
     else:
 
