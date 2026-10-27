@@ -282,6 +282,7 @@ def run_query(q, out_lang="auto"):
         "title_en": r["title"],
         "summary": summary_t,
         "lang": LANG_NAMES[target],
+        "lang_code": target,
         "intent": r["intent"],
         "intent_label": intent_t,
         "secs": list(
@@ -292,6 +293,20 @@ def run_query(q, out_lang="auto"):
         "link": link,
         "also": also
     }
+
+
+TTS_LANGS = {"en", "hi", "bn", "pa", "gu", "ta", "te", "kn", "ml", "mr", "ur"}  # gTTS has no Odia
+
+
+@st.cache_data(show_spinner=False, ttl=86400, max_entries=200)
+def speak(text, lang):
+    """Return MP3 bytes. Raises on failure so errors are never cached."""
+    import io
+    from gtts import gTTS
+
+    buf = io.BytesIO()
+    gTTS(text=text, lang=lang).write_to_fp(buf)
+    return buf.getvalue()
 
 
 def setq(t):
@@ -399,6 +414,22 @@ def render_answer(q, out_lang="auto"):
             key=f"dl_{k}",
             use_container_width=True
         )
+
+    with c3:
+        if d["lang_code"] in TTS_LANGS:
+            listen = st.button("🔊 Listen", key=f"tts_{k}")
+        else:
+            listen = False
+            st.caption("Audio is not available for this language.")
+
+    if listen:
+        body = d["summary"] or " ".join(t for _, t in d["secs"])
+        speech = (d["title"] + ". " + body)[:600]
+        try:
+            with st.spinner("Preparing audio…"):
+                st.audio(speak(speech, d["lang_code"]), format="audio/mp3", autoplay=True)
+        except Exception as ex:
+            st.caption(f"Audio could not be generated right now ({type(ex).__name__}). Try again in a minute.")
 
     if fb is not None:
         if st.session_state.get(f"fbd_{k}") != fb:
