@@ -60,51 +60,110 @@ kb = load_kb()
 
 
 _LAST_ERR = ["unknown"]
+SEP = "\n###\n"
 
 
-@st.cache_data(show_spinner=False, ttl=86400, max_entries=5000)
-def _tx_cached(text, src, dest):
-    """Translate ONE string. Raises on failure so failures are never cached."""
+MM_CODES = {"en": "en-GB", "hi": "hi-IN", "bn": "bn-IN", "pa": "pa-IN", "gu": "gu-IN",
+            "or": "or-IN", "ta": "ta-IN", "te": "te-IN", "kn": "kn-IN", "ml": "ml-IN",
+            "mr": "mr-IN", "ur": "ur-PK"}
+
+
+def _tx_google(text, src, dest):
     from deep_translator import GoogleTranslator
-    import time
+    return GoogleTranslator(source=src, target=dest).translate(text) or text
 
-    delays = [0, 2, 5, 10]  # back off when Google answers 429
-    for d in delays:
-        time.sleep(d)
+
+def _tx_claude(text, src, dest):
+    """Used only if ANTHROPIC_API_KEY is set. Keeps the ### separators."""
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("no ANTHROPIC_API_KEY")
+    import anthropic
+    msg = anthropic.Anthropic(api_key=key).messages.create(
+        model=os.getenv("BHARATGPT_MODEL", "claude-sonnet-5-5"), max_tokens=4000,
+        system=f"Translate the user's text from {LANG_NAMES[src]} to {LANG_NAMES[dest]}. "
+               "Keep every line that is exactly ### unchanged. Output only the translation.",
+        messages=[{"role": "user", "content": text}])
+    return msg.content[0].text
+
+
+def _tx_mymemory(text, src, dest):
+    """Free backup (no key). 500-char limit per request, so split into pieces."""
+    import re
+    from deep_translator import MyMemoryTranslator
+    tr = MyMemoryTranslator(source=MM_CODES[src], target=MM_CODES[dest])
+    out = []
+    for block in text.split(SEP):
+        pieces, cur = [], ""
+        for sent in re.split(r"(?<=[.!?।])\s+", block):
+            while len(sent) > 450:
+                pieces.append(sent[:450]); sent = sent[450:]
+            if len(cur) + len(sent) > 450:
+                pieces.append(cur); cur = sent
+            else:
+                cur = (cur + " " + sent).strip()
+        if cur:
+            pieces.append(cur)
+        out.append(" ".join(tr.translate(p) for p in pieces if p.strip()))
+    return SEP.join(out)
+
+
+@st.cache_data(show_spinner=False, ttl=86400, max_entries=2000)
+def _tx_cached(text, src, dest):
+    """Try Google, then Claude (if key set), then MyMemory. Raises if all fail,
+    so failures are never cached."""
+    errs = []
+    for fn in (_tx_google, _tx_claude, _tx_mymemory):
         try:
-            out = GoogleTranslator(source=src, target=dest).translate(text)
-            return out or text
+            return fn(text, src, dest)
         except Exception as ex:
-            _LAST_ERR[0] = f"{type(ex).__name__}: {str(ex)[:120]}"
-            if "TooManyRequests" not in type(ex).__name__:
-                break
+            if fn is not _tx_claude:
+                errs.append(f"{fn.__name__[4:]}: {type(ex).__name__}")
+    _LAST_ERR[0] = " | ".join(errs)
     raise RuntimeError(_LAST_ERR[0])
 
 
 def tx_many(items, src, dest):
     """
-    Sequential, cached translation (stays under Google's rate limit).
-    Failed items fall back to English; raises only if EVERYTHING fails.
+    Fast translation: strings are packed into a few big requests (about 1-2 per
+    answer instead of ~12). Stops at the first hard failure and falls back to
+    English for the rest; raises only if nothing could be translated.
     """
+    import re
+
     if src == dest:
         return items
 
-    import time
+    out = list(items)
+    todo = [i for i, t in enumerate(items) if t and t.strip() and not t.strip().isdigit()]
 
-    out, ok = [], []
-    for t in items:
-        if not t or not t.strip() or t.strip().isdigit():
-            out.append(t)
-            continue
+    # pack into chunks of <= 4000 chars
+    chunks, cur, size = [], [], 0
+    for i in todo:
+        if cur and size + len(items[i]) > 4000:
+            chunks.append(cur)
+            cur, size = [], 0
+        cur.append(i)
+        size += len(items[i]) + len(SEP)
+    if cur:
+        chunks.append(cur)
+
+    done = 0
+    for ch in chunks:
         try:
-            out.append(_tx_cached(t, src, dest))
-            ok.append(True)
-            time.sleep(0.25)
+            res = _tx_cached(SEP.join(items[i] for i in ch), src, dest)
+            parts = [p.strip() for p in re.split(r"\s*#{2,}\s*", res)]
+            if len(parts) == len(ch):
+                for i, p in zip(ch, parts):
+                    out[i] = p or items[i]
+            else:  # separator got mangled: translate one by one
+                for i in ch:
+                    out[i] = _tx_cached(items[i], src, dest)
+            done += 1
         except Exception:
-            out.append(t)
-            ok.append(False)
+            break  # blocked or offline: stop, don't wait on every item
 
-    if ok and not any(ok):
+    if todo and done == 0:
         raise RuntimeError(f"Translation failed ({src}->{dest}): {_LAST_ERR[0]}")
     return out
 
@@ -151,8 +210,8 @@ def run_query(q, out_lang="auto"):
     labels = [l for l, _ in items]
 
     texts = [
-        t if len(t) <= 1500
-        else t[:1500].rsplit(" ", 1)[0] + "…"
+        t if len(t) <= 700
+        else t[:700].rsplit(" ", 1)[0] + "…"
         for _, t in items
     ]
 
