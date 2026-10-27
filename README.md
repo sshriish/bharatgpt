@@ -4,9 +4,6 @@ BharatGPT answers questions about Indian government schemes in the user's own la
 
 **Live demo:** https://bharatgpt-india.streamlit.app/
 
-Micro Project | CSE | 2026-27
-Team: [Student name(s)] | Guide: [Faculty name]
-
 ## What it does
 - Answers questions on 3,399 central and state schemes (benefits, eligibility, documents, how to apply).
 - Detects the user's language and replies in it: 11 Indian languages plus English.
