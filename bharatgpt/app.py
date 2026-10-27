@@ -62,43 +62,51 @@ kb = load_kb()
 _LAST_ERR = ["unknown"]
 
 
-def _tx_one(text, src, dest):
-    """Translate one string; retry twice; fall back to the original text."""
+@st.cache_data(show_spinner=False, ttl=86400, max_entries=5000)
+def _tx_cached(text, src, dest):
+    """Translate ONE string. Raises on failure so failures are never cached."""
     from deep_translator import GoogleTranslator
     import time
 
-    if not text or not text.strip() or text.strip().isdigit():
-        return text, True  # deep_translator rejects empty/digit-only strings
-
-    for attempt in range(3):
+    delays = [0, 2, 5, 10]  # back off when Google answers 429
+    for d in delays:
+        time.sleep(d)
         try:
             out = GoogleTranslator(source=src, target=dest).translate(text)
-            return (out or text), True
+            return out or text
         except Exception as ex:
-            _LAST_ERR[0] = f"{type(ex).__name__}: {str(ex)[:200]}"
-            time.sleep(0.5 * (attempt + 1))
-    return text, False
+            _LAST_ERR[0] = f"{type(ex).__name__}: {str(ex)[:120]}"
+            if "TooManyRequests" not in type(ex).__name__:
+                break
+    raise RuntimeError(_LAST_ERR[0])
 
 
 def tx_many(items, src, dest):
     """
-    Parallel batch translate. One bad item no longer kills the whole answer:
-    it falls back to the English original. Raises only if EVERYTHING fails
-    (no internet / blocked), so errors stay visible and are never cached.
+    Sequential, cached translation (stays under Google's rate limit).
+    Failed items fall back to English; raises only if EVERYTHING fails.
     """
     if src == dest:
         return items
 
-    from concurrent.futures import ThreadPoolExecutor
+    import time
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        res = list(ex.map(lambda t: _tx_one(t, src, dest), items))
+    out, ok = [], []
+    for t in items:
+        if not t or not t.strip() or t.strip().isdigit():
+            out.append(t)
+            continue
+        try:
+            out.append(_tx_cached(t, src, dest))
+            ok.append(True)
+            time.sleep(0.25)
+        except Exception:
+            out.append(t)
+            ok.append(False)
 
-    real = [ok for (t, ok), i in zip(res, items) if i and i.strip()]
-    if real and not any(real):
+    if ok and not any(ok):
         raise RuntimeError(f"Translation failed ({src}->{dest}): {_LAST_ERR[0]}")
-
-    return [t for t, _ in res]
+    return out
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
