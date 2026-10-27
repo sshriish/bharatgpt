@@ -1,790 +1,230 @@
-import os
-import html
-import hashlib
-from urllib.parse import urlparse
-import streamlit as st
-from rag import *
-import ui
+"""BharatGPT core: knowledge base, retrieval (RAG), intent, guardrails, grievances."""
+import glob, os, re, sqlite3, uuid, datetime
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-st.set_page_config(
-    page_title="BharatGPT",
-    page_icon="🇮🇳",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+SCRIPTS = {"hi": (0x0900, 0x097F), "bn": (0x0980, 0x09FF), "pa": (0x0A00, 0x0A7F),
+           "gu": (0x0A80, 0x0AFF), "or": (0x0B00, 0x0B7F), "ta": (0x0B80, 0x0BFF),
+           "te": (0x0C00, 0x0C7F), "kn": (0x0C80, 0x0CFF), "ml": (0x0D00, 0x0D7F),
+           "ur": (0x0600, 0x06FF)}
+LANG_NAMES = {"en": "English", "hi": "Hindi", "bn": "Bengali", "pa": "Punjabi", "gu": "Gujarati",
+              "or": "Odia", "ta": "Tamil", "te": "Telugu", "kn": "Kannada", "ml": "Malayalam",
+              "mr": "Marathi", "ur": "Urdu"}
+TITLE_COLS = ["scheme_name", "name", "title", "scheme"]
+SOURCE_COLS = ["source_url", "source", "url", "link"]
 
-st.markdown(ui.CSS, unsafe_allow_html=True)
-e = html.escape
+# Hindi and Marathi share the Devanagari script, so we look at common function words.
+MR_WORDS = {"आहे", "आहेत", "काय", "मला", "माझ्या", "माझी", "माझे", "कसे", "कसा", "कशी",
+            "साठी", "मिळेल", "मिळते", "करायचा", "करावा", "कुठे", "किती", "आणि", "नाही"}
+HI_WORDS = {"है", "हैं", "क्या", "मुझे", "मेरा", "मेरी", "मेरे", "कैसे", "लिए", "मिलेगा",
+            "मिलता", "करें", "कहाँ", "कहां", "कितना", "और", "नहीं", "का", "की", "के"}
 
-LABELS = {
-    "details": "About the scheme",
-    "description": "About the scheme",
-    "benefits": "Benefits",
-    "eligibility": "Who can apply",
-    "documents": "Documents needed",
-    "documents_required": "Documents needed",
-    "application": "How to apply",
-    "how_to_apply": "How to apply"
-}
+def detect_lang(text):
+    counts = {l: sum(lo <= ord(c) <= hi for c in text) for l, (lo, hi) in SCRIPTS.items()}
+    best = max(counts, key=counts.get)
+    if counts[best] == 0:
+        return "en"
+    if best == "hi":
+        toks = set(re.findall(r"[\u0900-\u0963\u0966-\u097F]+", text))
+        if len(toks & MR_WORDS) > len(toks & HI_WORDS):
+            return "mr"
+    return best
 
-EXAMPLES = [
-    "PM Kisan eligibility",
-    "Ayushman Bharat benefits",
-    "Free LPG connection for women",
-    "How to file an RTI",
-    "किसान योजना क्या है",
-    "MGNREGA job card"
-]
+ALIASES = {"pm": "pradhan mantri", "pmjay": "ayushman bharat pradhan mantri jan arogya", "cm": "chief minister",
+           "mgnrega": "mahatma gandhi national rural employment guarantee", "nrega": "mahatma gandhi national rural employment guarantee",
+           "rti": "right to information", "lpg": "lpg gas", "pmay": "pradhan mantri awas yojana", "pmfby": "pradhan mantri fasal bima",
+           "pmkisan": "pradhan mantri kisan samman nidhi", "pm-kisan": "pradhan mantri kisan samman nidhi",
+           "kcc": "kisan credit card", "pmmvy": "pradhan mantri matru vandana yojana",
+           "nps": "national pension system", "apy": "atal pension yojana"}
 
-CATEGORIES = {
-    "Farmers": "schemes for farmers",
-    "Health": "health insurance scheme",
-    "Women and children": "schemes for women and children",
-    "Students": "scholarship for students",
-    "Housing": "housing scheme for poor",
-    "Pension and seniors": "old age pension scheme"
-}
+def expand_query(q):
+    return " ".join(ALIASES.get(w.lower().strip("?.,!"), w) for w in q.split())
+
+GRIEVANCE_RE = re.compile(r"\b(complaints?|grievances?|not received|bribe|corrupt\w*|harass\w*|delay\w*|cheated)\b")
+ELIGIBILITY_RE = re.compile(r"\b(eligible|eligibility|qualify|qualifies|who can)\b")
+POLICY_RE = re.compile(r"\b(rti|policy|policies|act|acts|law|laws|rule|rules)\b")
+
+def classify_intent(q):
+    """Whole-word matching, so 'articles' no longer triggers the 'rti' rule."""
+    q = q.lower()
+    if GRIEVANCE_RE.search(q):
+        return "grievance"
+    if ELIGIBILITY_RE.search(q):
+        return "eligibility"
+    if POLICY_RE.search(q):
+        return "policy"
+    return "scheme/service"
+
+FIELD_ORDER = ["details", "description", "benefits", "eligibility", "documents", "documents_required", "application", "how_to_apply"]
+SKIP_COLS = {"slug", "level", "schemecategory", "tags"}
+MYSCHEME = "https://www.myscheme.gov.in/schemes/"
+
+class KnowledgeBase:
+    """One chunk per (scheme, field), long fields split into <=chunk_words pieces."""
+    def __init__(self, data_dir="data", chunk_words=120):
+        self.chunks = []
+        for f in sorted(glob.glob(os.path.join(data_dir, "*.csv"))):
+            try:
+                df = pd.read_csv(f, encoding="utf-8")
+            except UnicodeDecodeError:
+                df = pd.read_csv(f, encoding="latin-1")
+            df = df.loc[:, ~df.columns.str.startswith("Unnamed")].fillna("")
+            cols = {c.lower().strip(): c for c in df.columns}
+            tcol = next((cols[c] for c in TITLE_COLS if c in cols), df.columns[0])
+            scol = next((cols[c] for c in SOURCE_COLS if c in cols), None)
+            slug = cols.get("slug")
+            for _, r in df.iterrows():
+                title = str(r[tcol])
+                src = str(r[scol]) if scol else (MYSCHEME + str(r[slug]) if slug else os.path.basename(f))
+                meta = " ".join(str(r[cols[k]]) for k in ("schemecategory", "tags", "level") if k in cols)
+                lvl = str(r[cols["level"]]) if "level" in cols else "Central"
+                self.chunks.append({"title": title, "source": src, "field": "category", "text": meta, "level": lvl})
+                for c in df.columns:
+                    if c in (tcol, scol) or c.lower() in SKIP_COLS or not str(r[c]).strip():
+                        continue
+                    w = " ".join(str(r[c]).split()).split(" ")
+                    for i in range(0, len(w), chunk_words):
+                        self.chunks.append({"title": title, "source": src, "field": c.lower(), "level": lvl, "text": " ".join(w[i:i + chunk_words])})
+        if not self.chunks:
+            raise RuntimeError(f"No CSV data found in '{data_dir}/'")
+        self.by_key = {}
+        for c in self.chunks:
+            self.by_key.setdefault((c["title"], c["source"]), []).append(c)
+        self.n_schemes = len(self.by_key)
+        self.vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True, min_df=2)
+        self.matrix = self.vec.fit_transform([f"{c['title']} {c['title']} {c['text']}" for c in self.chunks])
+
+    def search(self, query, k=3, central_boost=0.06):
+        """Cosine similarity + small boost for national (Central) schemes and for title-word overlap."""
+        q = query.lower()
+        sims = cosine_similarity(self.vec.transform([query]), self.matrix)[0].copy()
+        qw = set(w for w in q.replace("-", " ").split() if len(w) > 3)
+        if not hasattr(self, "_boost"):
+            self._boost = np.array([central_boost if c["level"] == "Central" else 0.0 for c in self.chunks])
+            self._tw = [set(c["title"].lower().replace("-", " ").split()) for c in self.chunks]
+        overlap = np.array([len(qw & t) for t in self._tw])
+        sims = sims + self._boost * (sims > 0.05) + 0.04 * np.minimum(overlap, 3)
+        idx = sims.argsort()[::-1][:k]
+        return [(float(sims[i]), self.chunks[i]) for i in idx]
+
+    def top_schemes(self, query, k=3, pool=40):
+        """Best chunk score per scheme -> ranked list of (score, title)."""
+        best = {}
+        for s, c in self.search(query, k=pool):
+            best.setdefault(c["title"], s)
+        return sorted(((s, t) for t, s in best.items()), reverse=True)[:k]
 
 
-@st.cache_resource
-def load_kb():
-    return KnowledgeBase(
-        os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "data"
-        )
-    )
+CLARIFY_GAP = 0.15          # top schemes closer than this are "tied"
+CLARIFY_MAX_WORDS = 2       # query with this many specific words or fewer is "vague"
+_VAGUE_STOP = {"scheme", "schemes", "yojana", "eligibility", "benefits", "benefit", "apply", "documents",
+               "government", "what", "which", "where", "when", "does", "about", "tell", "help", "need",
+               "with", "from", "have", "that", "this", "your", "world", "for", "the", "and", "how", "get",
+               "give", "info", "information"}
 
+def clarify_options(kb, raw_question, expanded_question):
+    """v2 rule: if the query is vague and several schemes score almost the same, return the top 3
+    (title, level) so the bot can ask which one the user means. Otherwise return None."""
+    words = [w for w in re.findall(r"[a-z]+", raw_question.lower()) if len(w) > 3 and w not in _VAGUE_STOP]
+    top = kb.top_schemes(expanded_question, k=3)
+    if len(top) < 2 or len(words) > CLARIFY_MAX_WORDS or top[0][0] - top[1][0] >= CLARIFY_GAP:
+        return None
+    level = {c["title"]: c["level"] for c in kb.chunks if c["title"] in {t for _, t in top}}
+    return [(t, level.get(t, "")) for _, t in top]
 
-kb = load_kb()
-
-
-_LAST_ERR = ["unknown"]
-SEP = "\n###\n"
-
-
-MM_CODES = {"en": "en-GB", "hi": "hi-IN", "bn": "bn-IN", "pa": "pa-IN", "gu": "gu-IN",
-            "or": "or-IN", "ta": "ta-IN", "te": "te-IN", "kn": "kn-IN", "ml": "ml-IN",
-            "mr": "mr-IN", "ur": "ur-PK"}
-
-
-def _tx_google(text, src, dest):
-    from deep_translator import GoogleTranslator
-    return GoogleTranslator(source=src, target=dest).translate(text) or text
-
-
-def _tx_claude(text, src, dest):
-    """Used only if ANTHROPIC_API_KEY is set. Keeps the ### separators."""
+def _llm_answer(question, hits):
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
-        raise RuntimeError("no ANTHROPIC_API_KEY")
-    import anthropic
-    msg = anthropic.Anthropic(api_key=key).messages.create(
-        model=os.getenv("BHARATGPT_MODEL", "claude-sonnet-5-5"), max_tokens=4000,
-        system=f"Translate the user's text from {LANG_NAMES[src]} to {LANG_NAMES[dest]}. "
-               "Keep every line that is exactly ### unchanged. Output only the translation.",
-        messages=[{"role": "user", "content": text}])
-    return msg.content[0].text
-
-
-def _tx_mymemory(text, src, dest):
-    """Free backup (no key). 500-char limit per request, so split into pieces."""
-    import re
-    from deep_translator import MyMemoryTranslator
-    tr = MyMemoryTranslator(source=MM_CODES[src], target=MM_CODES[dest])
-    out = []
-    for block in text.split(SEP):
-        pieces, cur = [], ""
-        for sent in re.split(r"(?<=[.!?।])\s+", block):
-            while len(sent) > 450:
-                pieces.append(sent[:450]); sent = sent[450:]
-            if len(cur) + len(sent) > 450:
-                pieces.append(cur); cur = sent
-            else:
-                cur = (cur + " " + sent).strip()
-        if cur:
-            pieces.append(cur)
-        out.append(" ".join(tr.translate(p) for p in pieces if p.strip()))
-    return SEP.join(out)
-
-
-@st.cache_data(show_spinner=False, ttl=86400, max_entries=2000)
-def _tx_cached(text, src, dest):
-    """Try Google, then Claude (if key set), then MyMemory. Raises if all fail,
-    so failures are never cached."""
-    errs = []
-    for fn in (_tx_google, _tx_claude, _tx_mymemory):
-        try:
-            return fn(text, src, dest)
-        except Exception as ex:
-            if fn is not _tx_claude:
-                errs.append(f"{fn.__name__[4:]}: {type(ex).__name__}")
-    _LAST_ERR[0] = " | ".join(errs)
-    raise RuntimeError(_LAST_ERR[0])
-
-
-def tx_many(items, src, dest):
-    """
-    Fast translation: strings are packed into a few big requests (about 1-2 per
-    answer instead of ~12). Stops at the first hard failure and falls back to
-    English for the rest; raises only if nothing could be translated.
-    """
-    import re
-
-    if src == dest:
-        return items
-
-    out = list(items)
-    todo = [i for i, t in enumerate(items) if t and t.strip() and not t.strip().isdigit()]
-
-    # pack into chunks of <= 4000 chars
-    chunks, cur, size = [], [], 0
-    for i in todo:
-        if cur and size + len(items[i]) > 4000:
-            chunks.append(cur)
-            cur, size = [], 0
-        cur.append(i)
-        size += len(items[i]) + len(SEP)
-    if cur:
-        chunks.append(cur)
-
-    done = 0
-    for ch in chunks:
-        try:
-            res = _tx_cached(SEP.join(items[i] for i in ch), src, dest)
-            parts = [p.strip() for p in re.split(r"\s*#{2,}\s*", res)]
-            if len(parts) == len(ch):
-                for i, p in zip(ch, parts):
-                    out[i] = p or items[i]
-            else:  # separator got mangled: translate one by one
-                for i in ch:
-                    out[i] = _tx_cached(items[i], src, dest)
-            done += 1
-        except Exception:
-            break  # blocked or offline: stop, don't wait on every item
-
-    if todo and done == 0:
-        raise RuntimeError(f"Translation failed ({src}->{dest}): {_LAST_ERR[0]}")
-    return out
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def run_query(q, out_lang="auto"):
-    lang = detect_lang(q)
-    target = lang if out_lang == "auto" else out_lang
-
-    # Translate user's question to English
-    q_en = tx_many([q], lang, "en")[0]
-
-    # Run RAG pipeline
-    r = answer(kb, q_en)
-
-    # v2: vague query, several schemes match -> ask the user to choose
-    if r["mode"] == "clarify":
-        return {"ok": False, "options": r["options"]}
-
-    if r["mode"] == "guardrail":
-        return {"ok": False}
-
-    # Merge sections with the same label
-    merged = {}
-
-    for f, t in r["sections"]:
-        lab = LABELS.get(
-            f,
-            f.replace("_", " ").title()
-        )
-
-        merged[lab] = (
-            merged.get(lab, "") + " " + t
-        ).strip()
-
-    # Prepare answer sections
-    items = list(merged.items()) or [
-        ("Answer", r["answer"])
-    ]
-
-    # For eligibility questions, show "Who can apply" first
-    if r["intent"] == "eligibility":
-        items.sort(key=lambda x: x[0] != "Who can apply")
-
-    # LLM summary (only exists when ANTHROPIC_API_KEY is set)
-    summary = r["answer"] if r["mode"] == "llm-rag" else ""
-
-    labels = [l for l, _ in items]
-
-    texts = [
-        t if len(t) <= 700
-        else t[:700].rsplit(" ", 1)[0] + "…"
-        for _, t in items
-    ]
-
-    # Confidence
-    c = r["confidence"]
-
-    n, word = (
-        (3, "Strong match")
-        if c >= 0.5
-        else (2, "Good match")
-        if c >= 0.35
-        else (1, "Possible match, please check the source")
-    )
-
-    # Get human-readable intent label
-    intent_label = ui.INTENTS.get(
-        r["intent"],
-        r["intent"]
-    )
-
-    # Translate title, confidence text, intent,
-    # section labels, section contents and summary together
-    out = tx_many(
-        [r["title"] or "Answer", word, intent_label]
-        + labels
-        + texts
-        + ([summary] if summary else []),
-        "en",
-        target
-    )
-
-    title, word_t, intent_t = out[:3]
-
-    labels_t = out[
-        3:3 + len(labels)
-    ]
-
-    texts_t = out[
-        3 + len(labels):
-        3 + len(labels) + len(texts)
-    ]
-
-    summary_t = out[-1] if summary else ""
-
-    # Find official source link
-    link = next(
-        (
-            s
-            for s in r["sources"]
-            if s.startswith("http")
-        ),
-        ""
-    )
-
-    # Find related schemes
-    also = [
-        t
-        for _, t in kb.top_schemes(
-            expand_query(q_en),
-            k=5
-        )
-        if t != r["title"]
-    ][:3]
-
-    return {
-        "ok": True,
-        "title": title,
-        "title_en": r["title"],
-        "summary": summary_t,
-        "lang": LANG_NAMES[target],
-        "lang_code": target,
-        "intent": r["intent"],
-        "intent_label": intent_t,
-        "secs": list(
-            zip(labels_t, texts_t)
-        ),
-        "n": n,
-        "word": word_t,
-        "link": link,
-        "also": also
-    }
-
-
-TTS_LANGS = {"en", "hi", "bn", "pa", "gu", "ta", "te", "kn", "ml", "mr", "ur"}  # gTTS has no Odia
-
-
-@st.cache_data(show_spinner=False, ttl=86400, max_entries=200)
-def speak(text, lang):
-    """Return MP3 bytes. Raises on failure so errors are never cached."""
-    import io
-    from gtts import gTTS
-
-    buf = io.BytesIO()
-    gTTS(text=text, lang=lang).write_to_fp(buf)
-    return buf.getvalue()
-
-
-def setq(t):
-    st.session_state.q = t
-
-
-def render_answer(q, out_lang="auto"):
+        return None
     try:
-        with st.spinner(
-            "Reading official scheme documents…"
-        ):
-            d = run_query(q, out_lang)
-
-    except Exception as ex:
-        st.markdown(
-            ui.note(
-                "<b>Translation is not working.</b><br>"
-                "BharatGPT needs the "
-                "<code>deep-translator</code> package "
-                "and an internet connection to answer in "
-                "other languages. Run "
-                "<code>pip install -r bharatgpt/requirements.txt</code>, "
-                "or try again in a minute if Google is "
-                "rate-limiting."
-            ),
-            unsafe_allow_html=True
-        )
-
-        st.caption(
-            f"Technical detail: "
-            f"{type(ex).__name__}: {ex}"
-        )
-
-        return
-
-    # v2: vague query -> show the top schemes as buttons
-    if not d["ok"] and d.get("options"):
-        st.markdown(
-            ui.note("<b>Several schemes match. Which one do you mean?</b>"),
-            unsafe_allow_html=True
-        )
-        kq = hashlib.md5(q.encode()).hexdigest()[:8]
-        for i, (t, lvl) in enumerate(d["options"]):
-            st.button(
-                f"{t} ({lvl})",
-                key=f"opt{kq}{i}",
-                on_click=setq,
-                args=(t,),
-                use_container_width=True
-            )
-        return
-
-    if not d["ok"]:
-        st.markdown(
-            ui.note(
-                "<b>No matching scheme found.</b><br>"
-                "BharatGPT answers only from official scheme "
-                "documents, so it will not guess. "
-                "Try the scheme name, for example "
-                "PM Kisan or Ayushman Bharat. "
-                "To report a problem, use the Grievance tab "
-                "or CPGRAMS (pgportal.gov.in)."
-            ),
-            unsafe_allow_html=True
-        )
-
-        return
-
-    host = (
-        urlparse(d["link"])
-        .netloc
-        .replace("www.", "")
-        or "official site"
-    )
-
-    # Use translated intent label here
-    st.markdown(
-        ui.card(
-            d["title"],
-            d["lang"],
-            d["intent_label"],
-            d["secs"],
-            d["n"],
-            d["word"],
-            host,
-            d["link"],
-            d["summary"]
-        ),
-        unsafe_allow_html=True
-    )
-
-    # Unique key for feedback/download/related buttons
-    k = hashlib.md5(
-        q.encode()
-    ).hexdigest()[:8]
-
-    txt = (
-        d["title"]
-        + "\n\n"
-        + "\n\n".join(
-            f"{l}\n{t}"
-            for l, t in d["secs"]
-        )
-        + f"\n\nSource: {d['link']}"
-    )
-
-    c1, c2, c3 = st.columns(
-        [1, 1.2, 3]
-    )
-
-    with c1:
-        fb = st.feedback(
-            "thumbs",
-            key=f"fb_{k}"
-        )
-
-    with c2:
-        st.download_button(
-            "Save answer",
-            txt,
-            file_name="bharatgpt-answer.txt",
-            key=f"dl_{k}",
-            use_container_width=True
-        )
-
-    with c3:
-        if d["lang_code"] in TTS_LANGS:
-            listen = st.button("🔊 Listen", key=f"tts_{k}")
-        else:
-            listen = False
-            st.caption("Audio is not available for this language.")
-
-    if listen:
-        body = d["summary"] or " ".join(t for _, t in d["secs"])
-        speech = (d["title"] + ". " + body)[:600]
-        try:
-            with st.spinner("Preparing audio…"):
-                st.audio(speak(speech, d["lang_code"]), format="audio/mp3", autoplay=True)
-        except Exception as ex:
-            st.caption(
-                f"Server audio failed ({type(ex).__name__}: {str(ex)[:120]}). "
-                "Using your browser's built-in voice instead."
-            )
-            import json
-            import streamlit.components.v1 as components
-            components.html(
-                f"""
-                <button id="b" style="padding:8px 16px;font-size:15px;cursor:pointer">
-                  ▶ Play in browser</button>
-                <script>
-                  document.getElementById('b').onclick = () => {{
-                    const u = new SpeechSynthesisUtterance({json.dumps(speech)});
-                    u.lang = {json.dumps(MM_CODES.get(d["lang_code"], "en-GB"))};
-                    speechSynthesis.cancel();
-                    speechSynthesis.speak(u);
-                  }};
-                </script>
-                """,
-                height=50,
-            )
-
-    if fb is not None:
-        if st.session_state.get(f"fbd_{k}") != fb:
-            log_feedback(q, d["title_en"], fb)
-            st.session_state[f"fbd_{k}"] = fb
-
-        st.caption(
-            "Thanks, your feedback helps improve answers."
-            if fb == 1
-            else
-            "Sorry about that. Try the scheme's official "
-            "name for a better match."
-        )
-
-    # Related schemes
-    if d["also"]:
-        st.markdown(
-            ui.head("Also relevant"),
-            unsafe_allow_html=True
-        )
-
-        cols = st.columns(
-            len(d["also"])
-        )
-
-        for i, t in enumerate(d["also"]):
-            cols[i].button(
-                t,
-                key=f"al{k}{i}",
-                on_click=setq,
-                args=(t,),
-                use_container_width=True
-            )
-
-    # Grievance information
-    if d["intent"] == "grievance":
-        st.info(
-            "This sounds like a complaint. "
-            "Use the Grievance tab to write and track it."
-        )
-
-
-# ---------------------------------------------------------
-# MAIN UI
-# ---------------------------------------------------------
-
-st.markdown(
-    ui.TOPBAR + ui.hero(kb.n_schemes, len(LANG_NAMES) - 1),
-    unsafe_allow_html=True
-)
-
-st.session_state.setdefault(
-    "history",
-    []
-)
-
-
-tab1, tab2 = st.tabs(
-    ["Ask a question", "Grievance"]
-)
-
-
-# =========================================================
-# TAB 1: ASK A QUESTION
-# =========================================================
-
-with tab1:
-
-    lang_opts = {"Auto (reply in my language)": "auto"}
-    lang_opts.update({n: c for c, n in LANG_NAMES.items()})
-    out_choice = st.selectbox(
-        "Answer language",
-        list(lang_opts),
-        key="out_lang"
-    )
-    out_lang = lang_opts[out_choice]
-
-    q = st.text_input(
-        "Your question",
-        key="q",
-        label_visibility="collapsed",
-        placeholder=(
-            "Search a scheme or ask a question, "
-            "in any language"
-        )
-    )
-
-    if q.strip():
-
-        q = q.strip()
-
-        # Add to recent searches
-        if q not in st.session_state.history:
-            st.session_state.history = (
-                [q] + st.session_state.history
-            )[:4]
-
-        st.button(
-            "Clear search",
-            on_click=setq,
-            args=("",)
-        )
-
-        render_answer(q, out_lang)
-
-    else:
-
-        # Browse by need
-        st.markdown(
-            ui.head("Browse by need"),
-            unsafe_allow_html=True
-        )
-
-        cols = st.columns(3)
-
-        for i, (label, query) in enumerate(
-            CATEGORIES.items()
-        ):
-            cols[i % 3].button(
-                label,
-                key=f"cat{i}",
-                on_click=setq,
-                args=(query,),
-                use_container_width=True
-            )
-
-        # Popular questions
-        st.markdown(
-            ui.head("Popular questions"),
-            unsafe_allow_html=True
-        )
-
-        cols = st.columns(3)
-
-        for i, ex in enumerate(EXAMPLES):
-            cols[i % 3].button(
-                ex,
-                key=f"ex{i}",
-                on_click=setq,
-                args=(ex,),
-                use_container_width=True
-            )
-
-        # Recent searches
-        if st.session_state.history:
-
-            st.markdown(
-                ui.head("Your recent searches"),
-                unsafe_allow_html=True
-            )
-
-            cols = st.columns(2)
-
-            for i, h in enumerate(
-                st.session_state.history
-            ):
-                cols[i % 2].button(
-                    h,
-                    key=f"h{i}",
-                    on_click=setq,
-                    args=(h,),
-                    use_container_width=True
-                )
-
-
-# =========================================================
-# TAB 2: GRIEVANCE
-# =========================================================
-
-with tab2:
-
-    st.markdown(
-        ui.note(
-            "<b>Demo only.</b> Complaints are not sent to "
-            "any government office. Please do not enter "
-            "real personal details."
-        ),
-        unsafe_allow_html=True
-    )
-
-    with st.form("g"):
-
-        a, b = st.columns(2)
-
-        name = a.text_input(
-            "Your name"
-        )
-
-        dept = b.text_input(
-            "Department or scheme"
-        )
-
-        text = st.text_area(
-            "What went wrong?",
-            height=140,
-            placeholder=(
-                "Describe the problem, when it happened "
-                "and what you expected."
-            )
-        )
-
-        if st.form_submit_button(
-            "Register complaint"
-        ):
-
-            if name and text:
-
-                d = dept or "Concerned Department"
-
-                ref = register_grievance(
-                    name,
-                    d,
-                    text,
-                    detect_lang(text)
-                )
-
-                st.toast(
-                    "Complaint registered",
-                    icon="✅"
-                )
-
-                st.markdown(
-                    ui.refbox(
-                        f'Complaint registered. '
-                        f'Save your reference ID'
-                        f'<div class="id">{ref}</div>'
-                    ),
-                    unsafe_allow_html=True
-                )
-
-                with st.expander(
-                    "Draft letter",
-                    expanded=True
-                ):
-                    st.code(
-                        draft_complaint(
-                            name,
-                            d,
-                            text
-                        ),
-                        language=None
-                    )
-
-            else:
-
-                st.warning(
-                    "Please enter your name and "
-                    "describe the problem."
-                )
-
-    # Track complaint
-    st.markdown(
-        ui.head("Track a complaint"),
-        unsafe_allow_html=True
-    )
-
-    ref = st.text_input(
-        "Reference ID",
-        label_visibility="collapsed",
-        placeholder="Enter your reference ID"
-    )
-
-    if ref:
-
-        row = grievance_status(
-            ref.strip()
-        )
-
-        if row:
-
-            steps = [
-                "registered",
-                "in review",
-                "resolved"
-            ]
-
-            idx = (
-                steps.index(
-                    str(row[2]).lower()
-                )
-                if str(row[2]).lower() in steps
-                else 0
-            )
-
-            st.markdown(
-                ui.refbox(
-                    f'{e(row[1])}<br>'
-                    f'Status: <b>{e(row[2])}</b>'
-                    f' &nbsp;·&nbsp; '
-                    f'Filed: {e(row[3])}'
-                    + ui.tracker(idx)
-                ),
-                unsafe_allow_html=True
-            )
-
-        else:
-
-            st.markdown(
-                ui.note(
-                    "No complaint found with that ID."
-                ),
-                unsafe_allow_html=True
-            )
-
-
-# =========================================================
-# FOOTER
-# =========================================================
-
-st.markdown(
-    '<div class="fine">'
-    'BharatGPT is a student project and not an official '
-    'government service. Data: MyScheme.gov.in via Kaggle. '
-    'Please verify every answer on the official page.'
-    '</div>',
-    unsafe_allow_html=True
-)
+        import anthropic
+        ctx = "\n\n".join(f"[{i+1}] {c['title']}: {c['text']}" for i, (_, c) in enumerate(hits))
+        msg = anthropic.Anthropic(api_key=key).messages.create(
+            model=os.getenv("BHARATGPT_MODEL", "claude-sonnet-5-5"), max_tokens=600,
+            system="You are BharatGPT, a citizen help assistant. Answer ONLY from the numbered context. "
+                   "If the context covers more than one scheme, name the scheme you are answering about and never mix details. "
+                   "If the context lacks the answer, say so. Be brief, use simple language, plain text only, "
+                   "and do not include citation numbers or markdown.",
+            messages=[{"role": "user", "content": f"Context:\n{ctx}\n\nQuestion: {question}"}])
+        return msg.content[0].text
+    except Exception:
+        return None
+
+def answer(kb, question, threshold=0.30):
+    """Returns dict(answer, sources, confidence, intent, mode)."""
+    intent = classify_intent(question)
+    raw_question = question
+    question = expand_query(question)
+    hits = kb.search(question, k=12)
+    top = hits[0][0]
+    GENERIC = {"scheme", "yojana", "eligibility", "benefits", "benefit", "apply", "documents", "government", "what", "which", "where", "when", "does", "about", "tell", "help", "need", "with", "from", "have", "that", "this", "your", "world"}
+    qw = set(w for w in question.lower().replace('-', ' ').split() if len(w) > 3 and w not in GENERIC)
+    tw = set(w for _, c in hits[:5] for w in c['title'].lower().replace('-', ' ').split())
+    if top < threshold and not (qw & tw):
+        return {"answer": "I could not find this in my official-document knowledge base, so I will not guess. "
+                          "For complaints you can use the Grievance tab or CPGRAMS (pgportal.gov.in).",
+                "sources": [], "confidence": top, "intent": intent, "mode": "guardrail", "title": None, "sections": []}
+    options = clarify_options(kb, raw_question, question)
+    if options:
+        return {"answer": "Several schemes match. Which one do you mean?", "options": options, "sources": [],
+                "confidence": top, "intent": intent, "mode": "clarify", "title": None, "sections": []}
+    best_chunk = hits[0][1]
+    best_title = best_chunk["title"]
+    # Use every field of the winning scheme (benefits, eligibility, documents, application),
+    # not only the chunks that happened to be in the top-12 hits.
+    allc = [c for c in kb.by_key.get((best_title, best_chunk["source"]), []) if c["field"] != "category"]
+    if not allc:
+        allc = [c for _, c in hits if c["title"] == best_title and c["field"] != "category"]
+    allc.sort(key=lambda c: FIELD_ORDER.index(c["field"]) if c["field"] in FIELD_ORDER else 99)
+    good = [(0.0, c) for c in allc]
+    per_field, capped = {}, []
+    for s, c in good:                      # at most 3 chunks per field go to the LLM / extractive text
+        per_field[c["field"]] = per_field.get(c["field"], 0) + 1
+        if per_field[c["field"]] <= 3:
+            capped.append((s, c))
+    text = _llm_answer(question, capped)
+    mode = "llm-rag"
+    if text is None:
+        mode = "extractive-rag"
+        text = f"**{best_title}**\n\n" + "\n\n".join(
+            f"**{c['field'].replace('_', ' ').title()}:** {c['text'][:700]}" for _, c in capped if c["field"] != "category")
+    srcs = list(dict.fromkeys(c["source"] for _, c in good))
+    return {"answer": text, "sources": srcs, "confidence": top, "intent": intent, "mode": mode,
+            "title": best_title, "sections": [(c["field"], c["text"]) for _, c in good if c["field"] != "category"]}
+
+# ---------- grievance module (SQLite) ----------
+def _db(path="grievances.db"):
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS g(ref TEXT PRIMARY KEY, name TEXT, dept TEXT, text TEXT, lang TEXT, status TEXT, created TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS fb(ts TEXT, query TEXT, title TEXT, rating INTEGER)")
+    return con
+
+def log_feedback(query, title, rating, path="grievances.db"):
+    """Store thumbs up (1) / down (0) so answer quality can be measured later. Never raises."""
+    try:
+        con = _db(path)
+        con.execute("INSERT INTO fb VALUES(?,?,?,?)",
+                    (datetime.datetime.now().isoformat(timespec="seconds"), query, title or "", int(rating)))
+        con.commit(); con.close()
+    except Exception:
+        pass
+
+def register_grievance(name, dept, text, lang="en", path="grievances.db"):
+    ref = "BGPT-" + uuid.uuid4().hex[:8].upper()
+    con = _db(path)
+    con.execute("INSERT INTO g VALUES(?,?,?,?,?,?,?)", (ref, name, dept, text, lang, "Registered", datetime.datetime.now().isoformat(timespec="seconds")))
+    con.commit(); con.close()
+    return ref
+
+def grievance_status(ref, path="grievances.db"):
+    con = _db(path)
+    row = con.execute("SELECT ref,dept,status,created FROM g WHERE ref=?", (ref.strip(),)).fetchone()
+    con.close()
+    return row
+
+def draft_complaint(name, dept, text):
+    return (f"To,\nThe Grievance Officer, {dept}\n\nSubject: Grievance regarding {dept}\n\nRespected Sir/Madam,\n\n"
+            f"I, {name}, wish to bring the following issue to your attention:\n\n{text}\n\n"
+            "I request you to look into the matter and take appropriate action at the earliest.\n\nYours faithfully,\n" + name)
