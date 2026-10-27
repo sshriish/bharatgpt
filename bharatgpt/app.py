@@ -69,8 +69,15 @@ MM_CODES = {"en": "en-GB", "hi": "hi-IN", "bn": "bn-IN", "pa": "pa-IN", "gu": "g
 
 
 def _tx_google(text, src, dest):
+    import time
     from deep_translator import GoogleTranslator
-    return GoogleTranslator(source=src, target=dest).translate(text) or text
+    for attempt in range(2):          # one retry: rate limits are often brief
+        try:
+            return GoogleTranslator(source=src, target=dest).translate(text) or text
+        except Exception:
+            if attempt == 1:
+                raise
+            time.sleep(1.5)
 
 
 def _tx_claude(text, src, dest):
@@ -179,6 +186,10 @@ def run_query(q, out_lang="auto"):
     # Run RAG pipeline
     r = answer(kb, q_en)
 
+    # v2: vague query, several schemes match -> ask the user to choose
+    if r["mode"] == "clarify":
+        return {"ok": False, "options": r["options"]}
+
     if r["mode"] == "guardrail":
         return {"ok": False}
 
@@ -234,14 +245,18 @@ def run_query(q, out_lang="auto"):
 
     # Translate title, confidence text, intent,
     # section labels, section contents and summary together
-    out = tx_many(
+    pack = (
         [r["title"] or "Answer", word, intent_label]
         + labels
         + texts
-        + ([summary] if summary else []),
-        "en",
-        target
+        + ([summary] if summary else [])
     )
+    translated = True
+    try:
+        out = tx_many(pack, "en", target)
+    except Exception:
+        # Translation services are rate-limited or offline: show the English answer instead of failing.
+        out, translated, target = list(pack), False, "en"
 
     title, word_t, intent_t = out[:3]
 
@@ -283,6 +298,7 @@ def run_query(q, out_lang="auto"):
         "summary": summary_t,
         "lang": LANG_NAMES[target],
         "lang_code": target,
+        "translated": translated,
         "intent": r["intent"],
         "intent_label": intent_t,
         "secs": list(
@@ -342,14 +358,31 @@ def render_answer(q, out_lang="auto"):
 
         return
 
+    # v2: vague query -> show the top schemes as buttons
+    if not d["ok"] and d.get("options"):
+        st.markdown(
+            ui.note("<b>Several schemes match. Which one do you mean?</b>"),
+            unsafe_allow_html=True
+        )
+        kq = hashlib.md5(q.encode()).hexdigest()[:8]
+        for i, (t, lvl) in enumerate(d["options"]):
+            st.button(
+                f"{t} ({lvl})",
+                key=f"opt{kq}{i}",
+                on_click=setq,
+                args=(t,),
+                use_container_width=True
+            )
+        return
+
     if not d["ok"]:
         st.markdown(
             ui.note(
                 "<b>No matching scheme found.</b><br>"
                 "BharatGPT answers only from official scheme "
                 "documents, so it will not guess. "
-                "Try the scheme name or a simple keyword such "
-                "as farmer, pension, health or scholarship. "
+                "Try the scheme name, for example "
+                "PM Kisan or Ayushman Bharat. "
                 "To report a problem, use the Grievance tab "
                 "or CPGRAMS (pgportal.gov.in)."
             ),
@@ -357,6 +390,14 @@ def render_answer(q, out_lang="auto"):
         )
 
         return
+
+    if not d.get("translated", True):
+        st.info(
+            "Translation is busy right now (the free translation service is rate-limited), "
+            "so this answer is shown in English."
+        )
+        st.button("Try translating again", key=f"retry_{hashlib.md5(q.encode()).hexdigest()[:8]}",
+                  on_click=run_query.clear)
 
     host = (
         urlparse(d["link"])
