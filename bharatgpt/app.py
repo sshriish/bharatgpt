@@ -59,6 +59,9 @@ def load_kb():
 kb = load_kb()
 
 
+_LAST_ERR = ["unknown"]
+
+
 def _tx_one(text, src, dest):
     """Translate one string; retry twice; fall back to the original text."""
     from deep_translator import GoogleTranslator
@@ -71,7 +74,8 @@ def _tx_one(text, src, dest):
         try:
             out = GoogleTranslator(source=src, target=dest).translate(text)
             return (out or text), True
-        except Exception:
+        except Exception as ex:
+            _LAST_ERR[0] = f"{type(ex).__name__}: {str(ex)[:200]}"
             time.sleep(0.5 * (attempt + 1))
     return text, False
 
@@ -87,12 +91,12 @@ def tx_many(items, src, dest):
 
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         res = list(ex.map(lambda t: _tx_one(t, src, dest), items))
 
     real = [ok for (t, ok), i in zip(res, items) if i and i.strip()]
     if real and not any(real):
-        raise RuntimeError("Translation service unreachable")
+        raise RuntimeError(f"Translation failed ({src}->{dest}): {_LAST_ERR[0]}")
 
     return [t for t, _ in res]
 
