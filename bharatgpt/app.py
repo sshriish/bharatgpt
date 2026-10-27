@@ -186,7 +186,6 @@ def run_query(q, out_lang="auto"):
     # Run RAG pipeline
     r = answer(kb, q_en)
 
-    # v2: vague query, several schemes match -> ask the user to choose
     if r["mode"] == "clarify":
         return {"ok": False, "options": r["options"]}
 
@@ -358,7 +357,6 @@ def render_answer(q, out_lang="auto"):
 
         return
 
-    # v2: vague query -> show the top schemes as buttons
     if not d["ok"] and d.get("options"):
         st.markdown(
             ui.note("<b>Several schemes match. Which one do you mean?</b>"),
