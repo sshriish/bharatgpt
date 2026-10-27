@@ -429,7 +429,27 @@ def render_answer(q, out_lang="auto"):
             with st.spinner("Preparing audio…"):
                 st.audio(speak(speech, d["lang_code"]), format="audio/mp3", autoplay=True)
         except Exception as ex:
-            st.caption(f"Audio could not be generated right now ({type(ex).__name__}). Try again in a minute.")
+            st.caption(
+                f"Server audio failed ({type(ex).__name__}: {str(ex)[:120]}). "
+                "Using your browser's built-in voice instead."
+            )
+            import json
+            import streamlit.components.v1 as components
+            components.html(
+                f"""
+                <button id="b" style="padding:8px 16px;font-size:15px;cursor:pointer">
+                  ▶ Play in browser</button>
+                <script>
+                  document.getElementById('b').onclick = () => {{
+                    const u = new SpeechSynthesisUtterance({json.dumps(speech)});
+                    u.lang = {json.dumps(MM_CODES.get(d["lang_code"], "en-GB"))};
+                    speechSynthesis.cancel();
+                    speechSynthesis.speak(u);
+                  }};
+                </script>
+                """,
+                height=50,
+            )
 
     if fb is not None:
         if st.session_state.get(f"fbd_{k}") != fb:
